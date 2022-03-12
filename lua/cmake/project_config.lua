@@ -2,6 +2,7 @@ local config = require('cmake.config')
 local os = require('ffi').os:lower()
 local utils = require('cmake.utils')
 local Path = require('plenary.path')
+local Job = require('plenary.job')
 local ProjectConfig = {}
 ProjectConfig.__index = ProjectConfig
 
@@ -154,6 +155,61 @@ function ProjectConfig:copy_compile_commands()
   local destination = Path:new(vim.loop.cwd(), 'compile_commands.json')
   destination:rm()
   compile_commands:copy({ destination = destination.filename })
+end
+
+function ProjectConfig:get_presets(opts)
+  local extract_preset_name = function(preset)
+    local name = preset:match('%".+%"')
+    return string.sub(name, 2, #name - 1)
+  end
+
+  if not (Path:new('CMakePresets.json'):exists() or Path:new('CMakeUserPresets.json'):exists()) then
+    utils.notify('Unable to find CMakePresets.json or CMakeUserPresets.json', vim.log.levels.ERROR)
+    return nil
+  end
+  local config_key = (opts['build'] == true) and 'build_preset' or 'configure_preset'
+  local args = (opts['build'] == true) and { '--build', '--list-presets' } or { '--list-presets' }
+
+  local job = Job:new({ command = config.cmake_executable, args = args })
+  local raw_presets = job:sync()
+  if vim.tbl_isempty(raw_presets) then
+    utils.notify('Getting presets failed: ' .. vim.inspect(job:stderr_result()), vim.log.levels.ERROR)
+    return nil
+  end
+  local active_preset = self.json[config_key]
+  local available_presets = {}
+  for index, line in ipairs(raw_presets) do
+    if index ~= 1 and line ~= '' then
+      local preset_name = extract_preset_name(line)
+      if preset_name == active_preset then
+        line = line .. ' (currently active)'
+      end
+      available_presets[preset_name] = line
+    end
+  end
+  return available_presets
+end
+
+function ProjectConfig:get_active_preset(opts)
+  local config_key = (opts['build'] == true) and 'build_preset' or 'configure_preset'
+  local active_preset = self.json[config_key]
+  if not active_preset then
+    return nil
+  end
+  local presets = self:get_presets(opts)
+  if not vim.tbl_contains(vim.tbl_keys(presets), active_preset) then
+    utils.notify('Active preset (' .. active_preset .. ') is not a valid preset, ignoring', vim.log.levels.WARN)
+    opts.preset = nil
+    self:set_active_preset(opts)
+    self:write()
+    return nil
+  end
+  return active_preset
+end
+
+function ProjectConfig:set_active_preset(opts)
+  local config_key = (opts['build'] == true) and 'build_preset' or 'configure_preset'
+  self.json[config_key] = opts.preset
 end
 
 return ProjectConfig

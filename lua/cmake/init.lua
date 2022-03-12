@@ -3,6 +3,7 @@ local utils = require('cmake.utils')
 local config = require('cmake.config')
 local scandir = require('plenary.scandir')
 local Path = require('plenary.path')
+local Job = require('plenary.job')
 local ProjectConfig = require('cmake.project_config')
 local cmake = {}
 
@@ -27,8 +28,15 @@ function cmake.configure(...)
     return
   end
 
-  local args = { '-B', project_config:get_build_dir().filename, '-D', 'CMAKE_BUILD_TYPE=' .. project_config.json.build_type, unpack(config.configure_args) }
+  local active_preset = project_config:get_active_preset({})
+  local args = {}
+  if active_preset then
+    args = { '--preset', active_preset, '-D', 'EXPORT_COMPILE_COMMANDS=1' }
+  else
+    args = { '-B', project_config:get_build_dir().filename, '-D', 'CMAKE_BUILD_TYPE=' .. project_config.json.build_type, unpack(config.configure_args) }
+  end
   vim.list_extend(args, { ... })
+
   return utils.run(config.cmake_executable, args, { on_success = project_config:copy_compile_commands() })
 end
 
@@ -38,13 +46,21 @@ function cmake.build(...)
   end
 
   local project_config = ProjectConfig.new()
+  local active_preset = project_config:get_active_preset({ build = true })
+
   if not project_config.json.current_target then
-    utils.notify('You need to select target first', vim.log.levels.ERROR)
+    utils.notify('You need to select a target first', vim.log.levels.ERROR)
     return
   end
 
-  local args = { '--build', project_config:get_build_dir().filename, '--target', project_config.json.current_target, unpack(config.build_args) }
+  local args = {}
+  if active_preset then
+    args = { '--build', '--preset', active_preset , '--target', project_config.json.current_target}
+  else
+    args = { '--build', project_config:get_build_dir().filename, '--target', project_config.json.current_target, unpack(config.build_args) }
+  end
   vim.list_extend(args, { ... })
+
   return utils.run(config.cmake_executable, args, { on_success = project_config:copy_compile_commands() })
 end
 
@@ -185,6 +201,36 @@ function cmake.select_build_type()
       return
     end
     project_config.json.build_type = build_type
+    project_config:write()
+  end)
+end
+
+function cmake.select_configure_preset()
+  local project_config = ProjectConfig:new()
+  local presets = project_config:get_presets({})
+  if not presets then
+    return
+  end
+  vim.ui.select(vim.tbl_values(presets), { prompt = 'select_preset' }, function(_, idx)
+    if not idx then
+      return
+    end
+    project_config:set_active_preset({ preset = vim.tbl_keys(presets)[idx] })
+    project_config:write()
+  end)
+end
+
+function cmake.select_build_preset()
+  local project_config = ProjectConfig:new()
+  local presets = project_config:get_presets({ build = true })
+  if not presets then
+    return
+  end
+  vim.ui.select(vim.tbl_values(presets), { prompt = 'select_preset' }, function(_, idx)
+    if not idx then
+      return
+    end
+    project_config:set_active_preset({ build = true, preset = vim.tbl_keys(presets)[idx] })
     project_config:write()
   end)
 end
