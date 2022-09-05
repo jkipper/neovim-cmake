@@ -7,10 +7,9 @@ local open = context_manager.open
 local PresetParser = {}
 PresetParser.__index = PresetParser
 
-function PresetParser.new()
-  local preset_files = {}
-  return setmetatable({}, PresetParser)
-end
+function PresetParser.new() return setmetatable({}, PresetParser) end
+
+---@alias ParsedPresets table<string, table>[]
 
 --- Parse presets out of a file
 ---@param file Path
@@ -30,8 +29,11 @@ function PresetParser:get_presets(file)
   return presets
 end
 
+--- Collect the relevant keys from the configure presets
+---@param configure_presets table[]
+---@return ParsedPresets
 function PresetParser:collect_configure_presets(configure_presets)
-  local relevant_keys = { 'binaryDir', 'hidden', 'name', 'inherits', 'description', 'generator' }
+  local relevant_keys = { 'displayName', 'binaryDir', 'hidden', 'name', 'inherits', 'description', 'generator' }
   local collected = {}
   for _, preset in ipairs(configure_presets) do
     collected[preset.name] = {}
@@ -42,16 +44,21 @@ function PresetParser:collect_configure_presets(configure_presets)
   return collected
 end
 
-function PresetParser:macro_expand(preset)
+local is_windows = function() return vim.loop.os_uname().sysname:find('Windows') and true or false end
+--- Expand any macro stored in a preset, as defined in the cmake spec: https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html#macro-expansion
+---@param preset table
+---@param file Path
+---@return table
+function PresetParser:macro_expand(preset, file)
   local available_macros = {
-    sourceDir = Path:new(vim.fn.getcwd()).filename, -- Not always accurate, but good enough for now
-    sourceParentDir = Path:new(vim.fn.getcwd()):parent().filename,
+    sourceDir = Path:new(vim.loop.cwd()):absolute(), -- Not always accurate, but good enough for now
+    sourceParentDir = Path:new(vim.loop.cwd()):parent():absolute(),
     presetName = preset.name,
     generator = preset.generator,
-    hostSystemName = '',
+    hostSystemName = vim.loop.os_uname().sysname,
+    fileDir = tostring(file:parent()),
     dollar = '$',
-    pathListSept = '/', -- make os specific
-    -- ["$env{(*)}"] = function () return "LOAD" end
+    pathListSep = is_windows() and ';' or ':',
   }
   for key, value in pairs(preset) do
     preset[key] = value:gsub('%${(%w+)}', available_macros):gsub('%$env{(%w+)}', function(env) return vim.fn.getenv(env) end)
@@ -59,18 +66,42 @@ function PresetParser:macro_expand(preset)
   return preset
 end
 
--- local parser = PresetParser.new()
--- local presets = parser:get_presets(Path:new(vim.fn.getcwd(), 'samples', 'C++ project', 'CMakePresets.json'))
--- local configure_presets = parser:collect_configure_presets(presets.configure)
+--- Resolve the inheritance of binaryDir and generators
+---@param presets ParsedPresets
+---@return ParsedPresets
+function PresetParser:resolve_inheritance(presets)
+  ---@type table<string,table?>
+  local result = {}
+  for name, preset in pairs(presets) do
+    local inherits = preset['inherits']
+    if inherits ~= nil then
+      local to_merge = { }
+      if type(inherits) == 'string' then
+        to_merge[#to_merge + 1] = presets[inherits]
+      else
+        for _, inherit_from in ipairs(inherits) do
+          to_merge[#to_merge + 1] = preset[inherit_from]
+        end
+      end
+      result[name] = self:_merge_presets(preset, to_merge)
+    else
+      result[name] = preset
+    end
+  end
+  return result
+end
 
--- local testPreset = {
---   name = 'TestPreset',
---   binaryDir = '${sourceDir}/some/${presetName}',
---   binaryDir2 = '${sourceParentDir}',
---   generator = 'ninja $env{HOME}',
---   description = 'Generator ${generator} ',
--- }
+function PresetParser:_merge_presets(start, presets)
+  local result = start
+  for _, value in ipairs(presets) do
+    if result['generator'] == nil then
+      result['generator'] = value['generator']
+    end
+    if result['binaryDir'] == nil then
+      result['binaryDir'] = value['binaryDir']
+    end
+  end
+  return result
+end
 
--- print(vim.inspect(parser:macro_expand(testPreset)))
 return PresetParser
--- print(vim.inspect(configure_presets))
